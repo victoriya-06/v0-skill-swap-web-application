@@ -225,7 +225,7 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
         addDebug("Signal subscription closed")
       }
     }
-  }, [matchId])
+  }, [matchId, partner.id])
 
   const handleSignal = async (signal: any) => {
     try {
