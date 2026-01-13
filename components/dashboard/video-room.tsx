@@ -83,6 +83,11 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
 
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = mediaStream
+          localVideoRef.current.onloadedmetadata = () => {
+            localVideoRef.current?.play().catch((err) => {
+              addDebug(`Error playing local video: ${err.message}`)
+            })
+          }
         }
 
         const peerConnection = new RTCPeerConnection({
@@ -363,7 +368,14 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
             {/* Remote Video (Main) */}
             <div className="absolute inset-0">
               {remoteStream ? (
-                <video ref={remoteVideoRef} autoPlay playsInline className="h-full w-full object-cover" />
+                <video
+                  ref={remoteVideoRef}
+                  autoPlay
+                  playsInline
+                  className="h-full w-full object-cover"
+                  onPlay={() => addDebug("Remote video playing")}
+                  onError={(e) => addDebug(`Remote video error: ${(e.target as HTMLVideoElement).error?.message}`)}
+                />
               ) : (
                 <div className="h-full w-full flex items-center justify-center bg-muted">
                   <div className="text-center">
@@ -380,7 +392,15 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
             {/* Local Video (Picture-in-Picture) */}
             <div className="absolute bottom-4 right-4 w-48 aspect-video rounded-lg overflow-hidden border-2 border-background shadow-lg">
               {isVideoOn && localStream ? (
-                <video ref={localVideoRef} autoPlay muted playsInline className="h-full w-full object-cover" />
+                <video
+                  ref={localVideoRef}
+                  autoPlay
+                  muted
+                  playsInline
+                  className="h-full w-full object-cover"
+                  onPlay={() => addDebug("Local video playing")}
+                  onError={(e) => addDebug(`Video error: ${(e.target as HTMLVideoElement).error?.message}`)}
+                />
               ) : (
                 <div className="h-full w-full bg-muted flex items-center justify-center">
                   <Avatar className="h-16 w-16">
