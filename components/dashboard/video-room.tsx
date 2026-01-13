@@ -28,27 +28,41 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
   const [error, setError] = useState<string | null>(null)
   const [noDevices, setNoDevices] = useState(false)
   const [connectionStatus, setConnectionStatus] = useState<"connecting" | "connected" | "disconnected">("connecting")
+  const [debugLog, setDebugLog] = useState<string[]>([]) // Added debug logging
 
   const localVideoRef = useRef<HTMLVideoElement>(null)
   const remoteVideoRef = useRef<HTMLVideoElement>(null)
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const signalSubscriptionRef = useRef<any>(null) // Track subscription
 
   const partnerInitials = partner.display_name?.slice(0, 2).toUpperCase() || "??"
   const userInitials = userProfile?.display_name?.slice(0, 2).toUpperCase() || "??"
 
+  const isOfferPeer = userId < partner.id
+
+  const addDebug = (message: string) => {
+    console.log("[v0]", message)
+    setDebugLog((prev) => [...prev.slice(-9), `${new Date().toLocaleTimeString()}: ${message}`])
+  }
+
   useEffect(() => {
     const initWebRTC = async () => {
       try {
+        addDebug(`Initializing WebRTC (${isOfferPeer ? "offer" : "answer"} peer)`)
+
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           setNoDevices(true)
           setError("Your browser doesn't support video calls.")
+          addDebug("Browser doesn't support mediaDevices")
           return
         }
 
         const devices = await navigator.mediaDevices.enumerateDevices()
         const hasVideo = devices.some((device) => device.kind === "videoinput")
         const hasAudio = devices.some((device) => device.kind === "audioinput")
+
+        addDebug(`Devices found - Video: ${hasVideo}, Audio: ${hasAudio}`)
 
         if (!hasVideo && !hasAudio) {
           setNoDevices(true)
@@ -65,23 +79,32 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
         setLocalStream(mediaStream)
         setIsVideoOn(hasVideo)
         setIsAudioOn(hasAudio)
+        addDebug("Local media stream acquired")
 
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = mediaStream
         }
 
         const peerConnection = new RTCPeerConnection({
-          iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }],
+          iceServers: [
+            {
+              urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302", "stun:stun2.l.google.com:19302"],
+            },
+            // Add TURN servers (optional - requires TURN server setup)
+            // { urls: ["turn:your-turn-server.com"], username: "user", credential: "pass" },
+          ],
+          iceCandidatePoolSize: 10,
         })
 
         peerConnectionRef.current = peerConnection
+        addDebug("RTCPeerConnection created")
 
         mediaStream.getTracks().forEach((track) => {
           peerConnection.addTrack(track, mediaStream)
         })
 
         peerConnection.ontrack = (event) => {
-          console.log("[v0] Remote track received:", event.track.kind)
+          addDebug(`Remote track received: ${event.track.kind}`)
           if (remoteVideoRef.current && event.streams[0]) {
             remoteVideoRef.current.srcObject = event.streams[0]
             setRemoteStream(event.streams[0])
@@ -89,7 +112,7 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
         }
 
         peerConnection.onconnectionstatechange = () => {
-          console.log("[v0] Connection state:", peerConnection.connectionState)
+          addDebug(`Connection state: ${peerConnection.connectionState}`)
           if (peerConnection.connectionState === "connected") {
             setConnectionStatus("connected")
           } else if (peerConnection.connectionState === "disconnected" || peerConnection.connectionState === "failed") {
@@ -97,15 +120,30 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
           }
         }
 
+        peerConnection.onicegatheringstatechange = () => {
+          addDebug(`ICE gathering state: ${peerConnection.iceGatheringState}`)
+        }
+
+        peerConnection.oniceconnectionstatechange = () => {
+          addDebug(`ICE connection state: ${peerConnection.iceConnectionState}`)
+        }
+
         peerConnection.onicecandidate = (event) => {
           if (event.candidate) {
+            addDebug(`Sending ICE candidate: ${event.candidate.candidate.substring(0, 50)}...`)
             sendSignal("ice-candidate", event.candidate)
           }
         }
 
-        const offer = await peerConnection.createOffer()
-        await peerConnection.setLocalDescription(offer)
-        sendSignal("offer", offer)
+        if (isOfferPeer) {
+          addDebug("Creating offer...")
+          const offer = await peerConnection.createOffer()
+          await peerConnection.setLocalDescription(offer)
+          addDebug("Sending offer")
+          sendSignal("offer", offer)
+        } else {
+          addDebug("Waiting for offer from peer...")
+        }
 
         setConnectionStatus("connecting")
       } catch (err) {
@@ -113,13 +151,15 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
         if (mediaError.name === "NotFoundError" || mediaError.name === "DevicesNotFoundError") {
           setNoDevices(true)
           setError("No camera or microphone found. You can still join audio-only or use chat.")
+          addDebug("No devices found error")
         } else if (mediaError.name === "NotAllowedError" || mediaError.name === "PermissionDeniedError") {
           setError("Camera/microphone access was denied. Please allow access in your browser settings.")
+          addDebug("Permission denied error")
         } else {
           setNoDevices(true)
           setError("Unable to access camera/microphone. You can still use chat to communicate.")
+          addDebug(`Unexpected media error: ${mediaError.message}`)
         }
-        console.error("[v0] Media error:", mediaError.name, mediaError.message)
       }
     }
 
@@ -128,6 +168,7 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
     return () => {
       if (localStream) {
         localStream.getTracks().forEach((track) => track.stop())
+        addDebug("Local media stream stopped")
       }
     }
   }, [])
@@ -142,8 +183,9 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
         signal_type: type,
         signal_data: data,
       })
+      addDebug(`Signal sent: ${type}`)
     } catch (err) {
-      console.error("[v0] Error sending signal:", err)
+      addDebug(`Error sending signal: ${err}`)
     }
   }
 
@@ -169,34 +211,48 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
       )
       .subscribe()
 
+    signalSubscriptionRef.current = channel
+    addDebug("Signal subscription created")
+
     return () => {
-      supabase.removeChannel(channel)
+      if (signalSubscriptionRef.current) {
+        supabase.removeChannel(signalSubscriptionRef.current)
+        addDebug("Signal subscription closed")
+      }
     }
-  }, [])
+  }, [matchId])
 
   const handleSignal = async (signal: any) => {
     try {
       const peerConnection = peerConnectionRef.current
-      if (!peerConnection) return
+      if (!peerConnection) {
+        addDebug("Peer connection not ready")
+        return
+      }
 
-      console.log("[v0] Received signal:", signal.signal_type)
+      addDebug(`Received signal: ${signal.signal_type}`)
 
       if (signal.signal_type === "offer") {
+        addDebug("Setting remote description (offer)")
         await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.signal_data))
+        addDebug("Creating answer")
         const answer = await peerConnection.createAnswer()
         await peerConnection.setLocalDescription(answer)
+        addDebug("Sending answer")
         sendSignal("answer", answer)
       } else if (signal.signal_type === "answer") {
+        addDebug("Setting remote description (answer)")
         await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.signal_data))
       } else if (signal.signal_type === "ice-candidate") {
         try {
+          addDebug("Adding ICE candidate")
           await peerConnection.addIceCandidate(new RTCIceCandidate(signal.signal_data))
         } catch (e) {
-          console.error("[v0] Error adding ICE candidate:", e)
+          addDebug(`Error adding ICE candidate: ${e}`)
         }
       }
     } catch (err) {
-      console.error("[v0] Error handling signal:", err)
+      addDebug(`Error handling signal: ${err}`)
     }
   }
 
