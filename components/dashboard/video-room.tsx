@@ -7,6 +7,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
 import { ArrowLeft, Video, VideoOff, Mic, MicOff, PhoneOff, MessageCircle, Maximize, Minimize } from "lucide-react"
+import { createClient } from "@/lib/supabase/client"
 import type { Profile } from "@/lib/types"
 
 interface VideoRoomProps {
@@ -18,21 +19,26 @@ interface VideoRoomProps {
   youLearn: string
 }
 
-export function VideoRoom({ matchId, userProfile, partner, youTeach, youLearn }: VideoRoomProps) {
+export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, youLearn }: VideoRoomProps) {
   const [isVideoOn, setIsVideoOn] = useState(true)
   const [isAudioOn, setIsAudioOn] = useState(true)
   const [isFullscreen, setIsFullscreen] = useState(false)
-  const [stream, setStream] = useState<MediaStream | null>(null)
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null)
+  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [noDevices, setNoDevices] = useState(false)
+  const [connectionStatus, setConnectionStatus] = useState<"connecting" | "connected" | "disconnected">("connecting")
+
   const localVideoRef = useRef<HTMLVideoElement>(null)
+  const remoteVideoRef = useRef<HTMLVideoElement>(null)
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
 
   const partnerInitials = partner.display_name?.slice(0, 2).toUpperCase() || "??"
   const userInitials = userProfile?.display_name?.slice(0, 2).toUpperCase() || "??"
 
   useEffect(() => {
-    const initMedia = async () => {
+    const initWebRTC = async () => {
       try {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           setNoDevices(true)
@@ -51,19 +57,57 @@ export function VideoRoom({ matchId, userProfile, partner, youTeach, youLearn }:
         }
 
         const constraints: MediaStreamConstraints = {
-          video: hasVideo,
-          audio: hasAudio,
+          video: hasVideo ? { width: { ideal: 1280 }, height: { ideal: 720 } } : false,
+          audio: hasAudio ? { echoCancellation: true, noiseSuppression: true } : false,
         }
 
         const mediaStream = await navigator.mediaDevices.getUserMedia(constraints)
-        setStream(mediaStream)
-
+        setLocalStream(mediaStream)
         setIsVideoOn(hasVideo)
         setIsAudioOn(hasAudio)
 
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = mediaStream
         }
+
+        const peerConnection = new RTCPeerConnection({
+          iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }],
+        })
+
+        peerConnectionRef.current = peerConnection
+
+        mediaStream.getTracks().forEach((track) => {
+          peerConnection.addTrack(track, mediaStream)
+        })
+
+        peerConnection.ontrack = (event) => {
+          console.log("[v0] Remote track received:", event.track.kind)
+          if (remoteVideoRef.current && event.streams[0]) {
+            remoteVideoRef.current.srcObject = event.streams[0]
+            setRemoteStream(event.streams[0])
+          }
+        }
+
+        peerConnection.onconnectionstatechange = () => {
+          console.log("[v0] Connection state:", peerConnection.connectionState)
+          if (peerConnection.connectionState === "connected") {
+            setConnectionStatus("connected")
+          } else if (peerConnection.connectionState === "disconnected" || peerConnection.connectionState === "failed") {
+            setConnectionStatus("disconnected")
+          }
+        }
+
+        peerConnection.onicecandidate = (event) => {
+          if (event.candidate) {
+            sendSignal("ice-candidate", event.candidate)
+          }
+        }
+
+        const offer = await peerConnection.createOffer()
+        await peerConnection.setLocalDescription(offer)
+        sendSignal("offer", offer)
+
+        setConnectionStatus("connecting")
       } catch (err) {
         const mediaError = err as DOMException
         if (mediaError.name === "NotFoundError" || mediaError.name === "DevicesNotFoundError") {
@@ -75,23 +119,90 @@ export function VideoRoom({ matchId, userProfile, partner, youTeach, youLearn }:
           setNoDevices(true)
           setError("Unable to access camera/microphone. You can still use chat to communicate.")
         }
-        console.error("Media error:", mediaError.name, mediaError.message)
+        console.error("[v0] Media error:", mediaError.name, mediaError.message)
       }
     }
 
-    initMedia()
+    initWebRTC()
 
     return () => {
-      if (stream) {
-        stream.getTracks().forEach((track) => track.stop())
+      if (localStream) {
+        localStream.getTracks().forEach((track) => track.stop())
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  const sendSignal = async (type: "offer" | "answer" | "ice-candidate", data: any) => {
+    try {
+      const supabase = createClient()
+      await supabase.from("webrtc_signals").insert({
+        match_id: matchId,
+        from_user_id: userId,
+        to_user_id: partner.id,
+        signal_type: type,
+        signal_data: data,
+      })
+    } catch (err) {
+      console.error("[v0] Error sending signal:", err)
+    }
+  }
+
+  useEffect(() => {
+    const supabase = createClient()
+
+    const channel = supabase
+      .channel(`webrtc:${matchId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "webrtc_signals",
+          filter: `match_id=eq.${matchId}`,
+        },
+        async (payload) => {
+          const signal = payload.new as any
+          if (signal.from_user_id === partner.id) {
+            await handleSignal(signal)
+          }
+        },
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [])
+
+  const handleSignal = async (signal: any) => {
+    try {
+      const peerConnection = peerConnectionRef.current
+      if (!peerConnection) return
+
+      console.log("[v0] Received signal:", signal.signal_type)
+
+      if (signal.signal_type === "offer") {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.signal_data))
+        const answer = await peerConnection.createAnswer()
+        await peerConnection.setLocalDescription(answer)
+        sendSignal("answer", answer)
+      } else if (signal.signal_type === "answer") {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.signal_data))
+      } else if (signal.signal_type === "ice-candidate") {
+        try {
+          await peerConnection.addIceCandidate(new RTCIceCandidate(signal.signal_data))
+        } catch (e) {
+          console.error("[v0] Error adding ICE candidate:", e)
+        }
+      }
+    } catch (err) {
+      console.error("[v0] Error handling signal:", err)
+    }
+  }
+
   const toggleVideo = () => {
-    if (stream) {
-      const videoTrack = stream.getVideoTracks()[0]
+    if (localStream) {
+      const videoTrack = localStream.getVideoTracks()[0]
       if (videoTrack) {
         videoTrack.enabled = !videoTrack.enabled
         setIsVideoOn(videoTrack.enabled)
@@ -100,8 +211,8 @@ export function VideoRoom({ matchId, userProfile, partner, youTeach, youLearn }:
   }
 
   const toggleAudio = () => {
-    if (stream) {
-      const audioTrack = stream.getAudioTracks()[0]
+    if (localStream) {
+      const audioTrack = localStream.getAudioTracks()[0]
       if (audioTrack) {
         audioTrack.enabled = !audioTrack.enabled
         setIsAudioOn(audioTrack.enabled)
@@ -120,8 +231,11 @@ export function VideoRoom({ matchId, userProfile, partner, youTeach, youLearn }:
   }
 
   const endCall = () => {
-    if (stream) {
-      stream.getTracks().forEach((track) => track.stop())
+    if (localStream) {
+      localStream.getTracks().forEach((track) => track.stop())
+    }
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close()
     }
     window.history.back()
   }
@@ -155,6 +269,9 @@ export function VideoRoom({ matchId, userProfile, partner, youTeach, youLearn }:
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <Badge variant={connectionStatus === "connected" ? "default" : "secondary"} className="text-xs">
+            {connectionStatus === "connected" ? "Connected" : "Connecting..."}
+          </Badge>
           <Button variant="outline" size="sm" asChild>
             <Link href={`/dashboard/chat/${matchId}`} className="gap-2">
               <MessageCircle className="h-4 w-4" />
@@ -187,23 +304,26 @@ export function VideoRoom({ matchId, userProfile, partner, youTeach, youLearn }:
           </div>
         ) : (
           <>
-            {/* Partner Video (Main) - Placeholder for WebRTC peer connection */}
-            <div className="absolute inset-0 flex items-center justify-center">
-              <div className="text-center">
-                <Avatar className="h-32 w-32 mx-auto">
-                  <AvatarFallback className="bg-primary/10 text-primary text-4xl">{partnerInitials}</AvatarFallback>
-                </Avatar>
-                <p className="mt-4 text-lg font-medium">{partner.display_name}</p>
-                <p className="text-sm text-muted-foreground">Waiting for {partner.display_name} to join...</p>
-                <Badge variant="outline" className="mt-2">
-                  Video calling demo - WebRTC peer connection would go here
-                </Badge>
-              </div>
+            {/* Remote Video (Main) */}
+            <div className="absolute inset-0">
+              {remoteStream ? (
+                <video ref={remoteVideoRef} autoPlay playsInline className="h-full w-full object-cover" />
+              ) : (
+                <div className="h-full w-full flex items-center justify-center bg-muted">
+                  <div className="text-center">
+                    <Avatar className="h-32 w-32 mx-auto">
+                      <AvatarFallback className="bg-primary/10 text-primary text-4xl">{partnerInitials}</AvatarFallback>
+                    </Avatar>
+                    <p className="mt-4 text-lg font-medium">{partner.display_name}</p>
+                    <p className="text-sm text-muted-foreground">Waiting for video stream...</p>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Local Video (Picture-in-Picture) */}
             <div className="absolute bottom-4 right-4 w-48 aspect-video rounded-lg overflow-hidden border-2 border-background shadow-lg">
-              {isVideoOn ? (
+              {isVideoOn && localStream ? (
                 <video ref={localVideoRef} autoPlay muted playsInline className="h-full w-full object-cover" />
               ) : (
                 <div className="h-full w-full bg-muted flex items-center justify-center">
