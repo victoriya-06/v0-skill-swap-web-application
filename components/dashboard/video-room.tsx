@@ -3,10 +3,21 @@
 import { useState, useRef, useEffect } from "react"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent } from "@/components/ui/card"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
-import { ArrowLeft, Video, VideoOff, Mic, MicOff, PhoneOff, MessageCircle, Maximize, Minimize } from "lucide-react"
+import {
+  ArrowLeft,
+  Video,
+  VideoOff,
+  Mic,
+  MicOff,
+  PhoneOff,
+  MessageCircle,
+  Maximize2,
+  Minimize2,
+  Eye,
+  EyeOff,
+} from "lucide-react"
 import { createClient } from "@/lib/supabase/client"
 import type { Profile } from "@/lib/types"
 
@@ -23,22 +34,22 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
   const [isVideoOn, setIsVideoOn] = useState(true)
   const [isAudioOn, setIsAudioOn] = useState(true)
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const [showStats, setShowStats] = useState(false)
   const [localStream, setLocalStream] = useState<MediaStream | null>(null)
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [noDevices, setNoDevices] = useState(false)
   const [connectionStatus, setConnectionStatus] = useState<"connecting" | "connected" | "disconnected">("connecting")
-  const [debugLog, setDebugLog] = useState<string[]>([]) // Added debug logging
+  const [debugLog, setDebugLog] = useState<string[]>([])
 
   const localVideoRef = useRef<HTMLVideoElement>(null)
   const remoteVideoRef = useRef<HTMLVideoElement>(null)
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
-  const signalSubscriptionRef = useRef<any>(null) // Track subscription
+  const signalSubscriptionRef = useRef<any>(null)
 
   const partnerInitials = partner.display_name?.slice(0, 2).toUpperCase() || "??"
   const userInitials = userProfile?.display_name?.slice(0, 2).toUpperCase() || "??"
-
   const isOfferPeer = userId < partner.id
 
   const addDebug = (message: string) => {
@@ -75,7 +86,6 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
           const mediaError = err as DOMException
           addDebug(`getUserMedia error: ${mediaError.name} - ${mediaError.message}`)
 
-          // Fallback: Try audio only
           if (mediaError.name === "NotFoundError" || mediaError.name === "DevicesNotFoundError") {
             addDebug("Camera not found, trying audio only...")
             try {
@@ -332,70 +342,83 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
   }
 
   return (
-    <div ref={containerRef} className="flex h-[calc(100vh-8rem)] flex-col bg-background">
-      {/* Header */}
-      <div className="flex items-center justify-between border-b px-4 py-3">
+    <div ref={containerRef} className="flex h-[calc(100vh-2rem)] flex-col bg-slate-900">
+      <div className="flex items-center justify-between border-b border-slate-700 bg-slate-800/50 px-4 py-3 backdrop-blur-sm">
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="icon" asChild>
+          <Button variant="ghost" size="icon" className="hover:bg-slate-700" asChild>
             <Link href={`/dashboard/chat/${matchId}`}>
-              <ArrowLeft className="h-5 w-5" />
+              <ArrowLeft className="h-5 w-5 text-slate-200" />
             </Link>
           </Button>
-          <div className="flex items-center gap-2">
-            <Avatar className="h-8 w-8">
-              <AvatarFallback className="bg-primary/10 text-primary text-sm">{partnerInitials}</AvatarFallback>
+          <div className="flex items-center gap-3">
+            <Avatar className="h-10 w-10 border-2 border-slate-600">
+              <AvatarFallback className="bg-gradient-to-br from-primary to-pink-400 text-white font-semibold">
+                {partnerInitials}
+              </AvatarFallback>
             </Avatar>
             <div>
-              <p className="font-medium text-sm">{partner.display_name}</p>
-              <div className="flex items-center gap-1">
-                <Badge variant="secondary" className="text-xs h-5">
+              <p className="font-medium text-slate-100">{partner.display_name}</p>
+              <div className="flex items-center gap-2">
+                <Badge
+                  variant="secondary"
+                  className="bg-slate-700 text-slate-200 border-slate-600 text-xs h-5 hover:bg-slate-700"
+                >
                   {youTeach}
                 </Badge>
-                <span className="text-xs text-muted-foreground">↔</span>
-                <Badge variant="outline" className="text-xs h-5">
+                <span className="text-xs text-slate-400">↔</span>
+                <Badge
+                  variant="outline"
+                  className="bg-slate-700 text-slate-200 border-slate-600 text-xs h-5 hover:bg-slate-700"
+                >
                   {youLearn}
                 </Badge>
               </div>
             </div>
           </div>
         </div>
+
         <div className="flex items-center gap-2">
-          <Badge variant={connectionStatus === "connected" ? "default" : "secondary"} className="text-xs">
+          <Badge
+            variant={connectionStatus === "connected" ? "default" : "secondary"}
+            className={`text-xs font-medium ${
+              connectionStatus === "connected"
+                ? "bg-green-600 text-white hover:bg-green-700"
+                : "bg-slate-700 text-slate-200 hover:bg-slate-600"
+            }`}
+          >
+            {connectionStatus === "connected" ? "●" : "○"}{" "}
             {connectionStatus === "connected" ? "Connected" : "Connecting..."}
           </Badge>
-          <Button variant="outline" size="sm" asChild>
-            <Link href={`/dashboard/chat/${matchId}`} className="gap-2">
-              <MessageCircle className="h-4 w-4" />
-              <span className="hidden sm:inline">Chat</span>
-            </Link>
-          </Button>
         </div>
       </div>
 
-      {/* Video Area */}
-      <div className="flex-1 relative bg-muted/50 overflow-hidden">
+      <div className="flex-1 relative bg-slate-950 overflow-hidden">
         {error ? (
           <div className="absolute inset-0 flex items-center justify-center">
-            <Card className="max-w-md">
-              <CardContent className="p-6 text-center">
-                <VideoOff className="mx-auto h-12 w-12 text-muted-foreground" />
-                <p className="mt-4 font-medium">{noDevices ? "No Camera Available" : "Camera Access Required"}</p>
-                <p className="mt-2 text-sm text-muted-foreground">{error}</p>
-                <div className="mt-4 flex gap-2 justify-center">
-                  {!noDevices && <Button onClick={() => window.location.reload()}>Try Again</Button>}
-                  <Button variant={noDevices ? "default" : "outline"} asChild>
-                    <Link href={`/dashboard/chat/${matchId}`}>
-                      <MessageCircle className="mr-2 h-4 w-4" />
-                      Use Chat Instead
-                    </Link>
+            <div className="bg-slate-800 rounded-2xl p-8 text-center max-w-md border border-slate-700">
+              <VideoOff className="mx-auto h-16 w-16 text-slate-400 mb-4" />
+              <p className="font-semibold text-slate-100 text-lg mb-2">
+                {noDevices ? "No Camera Available" : "Camera Access Required"}
+              </p>
+              <p className="text-slate-400 text-sm mb-6">{error}</p>
+              <div className="flex gap-3 justify-center">
+                {!noDevices && (
+                  <Button onClick={() => window.location.reload()} className="bg-primary hover:bg-primary/90">
+                    Try Again
                   </Button>
-                </div>
-              </CardContent>
-            </Card>
+                )}
+                <Button variant="outline" className="border-slate-600 hover:bg-slate-800 bg-transparent" asChild>
+                  <Link href={`/dashboard/chat/${matchId}`} className="gap-2">
+                    <MessageCircle className="h-4 w-4" />
+                    Use Chat
+                  </Link>
+                </Button>
+              </div>
+            </div>
           </div>
         ) : (
           <>
-            {/* Remote Video (Main) */}
+            {/* Remote video - Main/Speaker view */}
             <div className="absolute inset-0">
               {remoteStream ? (
                 <video
@@ -407,20 +430,22 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
                   onError={(e) => addDebug(`Remote video error: ${(e.target as HTMLVideoElement).error?.message}`)}
                 />
               ) : (
-                <div className="h-full w-full flex items-center justify-center bg-muted">
+                <div className="h-full w-full flex items-center justify-center bg-gradient-to-br from-slate-900 to-slate-950">
                   <div className="text-center">
-                    <Avatar className="h-32 w-32 mx-auto">
-                      <AvatarFallback className="bg-primary/10 text-primary text-4xl">{partnerInitials}</AvatarFallback>
+                    <Avatar className="h-40 w-40 mx-auto mb-6 border-4 border-slate-700">
+                      <AvatarFallback className="bg-gradient-to-br from-primary to-pink-400 text-white text-5xl font-semibold">
+                        {partnerInitials}
+                      </AvatarFallback>
                     </Avatar>
-                    <p className="mt-4 text-lg font-medium">{partner.display_name}</p>
-                    <p className="text-sm text-muted-foreground">Waiting for video stream...</p>
+                    <p className="text-2xl font-semibold text-slate-100 mb-2">{partner.display_name}</p>
+                    <p className="text-slate-400">Waiting for video stream...</p>
                   </div>
                 </div>
               )}
             </div>
 
-            {/* Local Video (Picture-in-Picture) */}
-            <div className="absolute bottom-4 right-4 w-48 aspect-video rounded-lg overflow-hidden border-2 border-background shadow-lg">
+            {/* Local video - Picture-in-Picture corner */}
+            <div className="absolute bottom-24 right-4 w-56 aspect-video rounded-2xl overflow-hidden border-2 border-slate-600 shadow-2xl bg-slate-800 hover:shadow-primary/20 transition-shadow">
               {isVideoOn && localStream ? (
                 <video
                   ref={localVideoRef}
@@ -432,9 +457,11 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
                   onError={(e) => addDebug(`Video error: ${(e.target as HTMLVideoElement).error?.message}`)}
                 />
               ) : (
-                <div className="h-full w-full bg-muted flex items-center justify-center">
-                  <Avatar className="h-16 w-16">
-                    <AvatarFallback className="bg-primary/10 text-primary">{userInitials}</AvatarFallback>
+                <div className="h-full w-full bg-gradient-to-br from-slate-800 to-slate-900 flex items-center justify-center">
+                  <Avatar className="h-20 w-20">
+                    <AvatarFallback className="bg-gradient-to-br from-primary to-pink-400 text-white text-2xl font-semibold">
+                      {userInitials}
+                    </AvatarFallback>
                   </Avatar>
                 </div>
               )}
@@ -443,38 +470,86 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
         )}
       </div>
 
-      {/* Controls */}
-      <div className="border-t bg-background px-4 py-4">
-        <div className="flex items-center justify-center gap-4">
+      <div className="absolute bottom-0 left-0 right-0 flex items-center justify-center pb-6 px-4">
+        <div className="bg-slate-800/95 backdrop-blur-md rounded-full px-6 py-3 flex items-center gap-4 border border-slate-700 shadow-2xl">
+          {/* Audio Toggle */}
           <Button
-            variant={isAudioOn ? "outline" : "destructive"}
+            variant={isAudioOn ? "ghost" : "destructive"}
             size="lg"
-            className="h-14 w-14 rounded-full"
+            className={`h-12 w-12 rounded-full transition-all ${
+              isAudioOn
+                ? "hover:bg-slate-700 text-slate-200 hover:text-slate-100"
+                : "bg-red-600 hover:bg-red-700 text-white"
+            }`}
             onClick={toggleAudio}
+            title={isAudioOn ? "Mute microphone (Ctrl+M)" : "Unmute microphone"}
           >
-            {isAudioOn ? <Mic className="h-6 w-6" /> : <MicOff className="h-6 w-6" />}
+            {isAudioOn ? <Mic className="h-5 w-5" /> : <MicOff className="h-5 w-5" />}
           </Button>
+
+          {/* Video Toggle */}
           <Button
-            variant={isVideoOn ? "outline" : "destructive"}
+            variant={isVideoOn ? "ghost" : "destructive"}
             size="lg"
-            className="h-14 w-14 rounded-full"
+            className={`h-12 w-12 rounded-full transition-all ${
+              isVideoOn
+                ? "hover:bg-slate-700 text-slate-200 hover:text-slate-100"
+                : "bg-red-600 hover:bg-red-700 text-white"
+            }`}
             onClick={toggleVideo}
+            title={isVideoOn ? "Turn off camera (Ctrl+E)" : "Turn on camera"}
           >
-            {isVideoOn ? <Video className="h-6 w-6" /> : <VideoOff className="h-6 w-6" />}
+            {isVideoOn ? <Video className="h-5 w-5" /> : <VideoOff className="h-5 w-5" />}
           </Button>
-          <Button variant="destructive" size="lg" className="h-14 w-14 rounded-full" onClick={endCall}>
-            <PhoneOff className="h-6 w-6" />
-          </Button>
+
+          <div className="w-px h-8 bg-slate-600"></div>
+
+          {/* End Call - Red button */}
           <Button
-            variant="outline"
+            variant="destructive"
             size="lg"
-            className="h-14 w-14 rounded-full bg-transparent"
-            onClick={toggleFullscreen}
+            className="h-12 w-12 rounded-full bg-red-600 hover:bg-red-700 text-white shadow-lg hover:shadow-red-600/50 transition-all"
+            onClick={endCall}
+            title="End call (Escape)"
           >
-            {isFullscreen ? <Minimize className="h-6 w-6" /> : <Maximize className="h-6 w-6" />}
+            <PhoneOff className="h-5 w-5" />
+          </Button>
+
+          <div className="w-px h-8 bg-slate-600"></div>
+
+          {/* More Options */}
+          <Button
+            variant="ghost"
+            size="lg"
+            className="h-12 w-12 rounded-full hover:bg-slate-700 text-slate-200 hover:text-slate-100 transition-all"
+            onClick={() => setShowStats(!showStats)}
+            title="Show connection stats"
+          >
+            {showStats ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+          </Button>
+
+          <Button
+            variant="ghost"
+            size="lg"
+            className="h-12 w-12 rounded-full hover:bg-slate-700 text-slate-200 hover:text-slate-100 transition-all"
+            onClick={toggleFullscreen}
+            title={isFullscreen ? "Exit fullscreen (F)" : "Enter fullscreen"}
+          >
+            {isFullscreen ? <Minimize2 className="h-5 w-5" /> : <Maximize2 className="h-5 w-5" />}
           </Button>
         </div>
       </div>
+
+      {showStats && (
+        <div className="absolute top-20 left-4 bg-slate-800/90 backdrop-blur-md border border-slate-700 rounded-lg p-3 text-xs text-slate-300 max-w-sm font-mono z-10">
+          <p className="font-semibold text-slate-100 mb-2">Connection Stats</p>
+          {debugLog.slice(-5).map((log, i) => (
+            <p key={i} className="text-slate-400">
+              {log}
+            </p>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
