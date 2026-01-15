@@ -58,11 +58,45 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
           return
         }
 
-        const devices = await navigator.mediaDevices.enumerateDevices()
-        const hasVideo = devices.some((device) => device.kind === "videoinput")
-        const hasAudio = devices.some((device) => device.kind === "audioinput")
+        let devices: MediaDeviceInfo[] = []
+        try {
+          // Request camera and microphone permissions first
+          await navigator.mediaDevices
+            .getUserMedia({ audio: true, video: true })
+            .then((stream) => {
+              // Close immediately, we just needed permissions
+              stream.getTracks().forEach((track) => track.stop())
+              addDebug("Permissions granted")
+            })
+            .catch(() => {
+              addDebug("Initial permission check skipped (user may have denied)")
+            })
+
+          // Now enumerate devices
+          devices = await navigator.mediaDevices.enumerateDevices()
+        } catch (err) {
+          addDebug(`Error enumerating devices: ${err}`)
+          devices = await navigator.mediaDevices.enumerateDevices()
+        }
+
+        const hasVideo = devices.some((device) => device.kind === "videoinput" && device.deviceId !== "")
+        const hasAudio = devices.some((device) => device.kind === "audioinput" && device.deviceId !== "")
 
         addDebug(`Devices found - Video: ${hasVideo}, Audio: ${hasAudio}`)
+        if (hasVideo) {
+          devices
+            .filter((d) => d.kind === "videoinput")
+            .forEach((d) => {
+              addDebug(`  Video device: ${d.label || d.deviceId}`)
+            })
+        }
+        if (hasAudio) {
+          devices
+            .filter((d) => d.kind === "audioinput")
+            .forEach((d) => {
+              addDebug(`  Audio device: ${d.label || d.deviceId}`)
+            })
+        }
 
         if (!hasVideo && !hasAudio) {
           setNoDevices(true)
@@ -71,15 +105,30 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
         }
 
         const constraints: MediaStreamConstraints = {
-          video: hasVideo ? { width: { ideal: 1280 }, height: { ideal: 720 } } : false,
-          audio: hasAudio ? { echoCancellation: true, noiseSuppression: true } : false,
+          video: hasVideo
+            ? {
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+                facingMode: "user",
+              }
+            : false,
+          audio: hasAudio
+            ? {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+              }
+            : false,
         }
 
+        addDebug(`Requesting media with constraints: video=${!!constraints.video}, audio=${!!constraints.audio}`)
         const mediaStream = await navigator.mediaDevices.getUserMedia(constraints)
         setLocalStream(mediaStream)
         setIsVideoOn(hasVideo)
         setIsAudioOn(hasAudio)
-        addDebug("Local media stream acquired")
+        addDebug(
+          `Local media stream acquired - Video tracks: ${mediaStream.getVideoTracks().length}, Audio tracks: ${mediaStream.getAudioTracks().length}`,
+        )
 
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = mediaStream
@@ -93,10 +142,14 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
         const peerConnection = new RTCPeerConnection({
           iceServers: [
             {
-              urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302", "stun:stun2.l.google.com:19302"],
+              urls: [
+                "stun:stun.l.google.com:19302",
+                "stun:stun1.l.google.com:19302",
+                "stun:stun2.l.google.com:19302",
+                "stun:stun3.l.google.com:19302",
+                "stun:stun4.l.google.com:19302",
+              ],
             },
-            // Add TURN servers (optional - requires TURN server setup)
-            // { urls: ["turn:your-turn-server.com"], username: "user", credential: "pass" },
           ],
           iceCandidatePoolSize: 10,
         })
@@ -105,7 +158,12 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
         addDebug("RTCPeerConnection created")
 
         mediaStream.getTracks().forEach((track) => {
-          peerConnection.addTrack(track, mediaStream)
+          addDebug(`Adding track to peer connection: ${track.kind}`)
+          try {
+            peerConnection.addTrack(track, mediaStream)
+          } catch (err) {
+            addDebug(`Error adding track: ${err}`)
+          }
         })
 
         peerConnection.ontrack = (event) => {
@@ -113,6 +171,7 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
           if (remoteVideoRef.current && event.streams[0]) {
             remoteVideoRef.current.srcObject = event.streams[0]
             setRemoteStream(event.streams[0])
+            addDebug("Remote stream set to video element")
           }
         }
 
@@ -162,7 +221,7 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
           addDebug("Permission denied error")
         } else {
           setNoDevices(true)
-          setError("Unable to access camera/microphone. You can still use chat to communicate.")
+          setError(`Unable to access media: ${mediaError.message}`)
           addDebug(`Unexpected media error: ${mediaError.message}`)
         }
       }
@@ -214,7 +273,9 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
           }
         },
       )
-      .subscribe()
+      .subscribe((status) => {
+        addDebug(`Subscription status: ${status}`)
+      })
 
     signalSubscriptionRef.current = channel
     addDebug("Signal subscription created")
@@ -225,7 +286,7 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
         addDebug("Signal subscription closed")
       }
     }
-  }, [matchId, partner.id])
+  }, [matchId, partner.id, userId])
 
   const handleSignal = async (signal: any) => {
     try {
