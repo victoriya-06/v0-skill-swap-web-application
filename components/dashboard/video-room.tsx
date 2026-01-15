@@ -1,12 +1,13 @@
 "use client"
 
-import { useState, useRef, useEffect } from "react"
+import { useRef } from "react"
+
+import { useState, useEffect } from "react"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
-import { ArrowLeft, Video, VideoOff, Mic, MicOff, PhoneOff, MessageCircle, Eye, EyeOff } from "lucide-react"
-import { createClient } from "@/lib/supabase/client"
+import { ArrowLeft, VideoOff, MessageCircle, Maximize2 } from "lucide-react"
 import type { Profile } from "@/lib/types"
 
 interface VideoRoomProps {
@@ -19,6 +20,7 @@ interface VideoRoomProps {
 }
 
 export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, youLearn }: VideoRoomProps) {
+  const [isFullscreen, setIsFullscreen] = useState(false)
   const [isVideoOn, setIsVideoOn] = useState(true)
   const [isAudioOn, setIsAudioOn] = useState(true)
   const [showStats, setShowStats] = useState(false)
@@ -45,230 +47,60 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
     setDebugLog((prev) => [...prev.slice(-9), `${new Date().toLocaleTimeString()}: ${message}`])
   }
 
+  const jitsiRoomId = `SkillSwap_${matchId.replace(/-/g, "_")}`
+
   useEffect(() => {
-    const initWebRTC = async () => {
-      try {
-        addDebug(`Initializing WebRTC (${isOfferPeer ? "offer" : "answer"} peer)`)
+    const script = document.createElement("script")
+    script.src = "https://meet.jit.si/external_api.js"
+    script.async = true
+    document.body.appendChild(script)
 
-        // Request media with fallback to audio-only
-        let mediaStream: MediaStream | null = null
-        try {
-          mediaStream = await navigator.mediaDevices.getUserMedia({
-            audio: { echoCancellation: true, noiseSuppression: true },
-            video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
-          })
-          addDebug(
-            `Media acquired - Video: ${mediaStream.getVideoTracks().length}, Audio: ${mediaStream.getAudioTracks().length}`,
-          )
-        } catch (err) {
-          const mediaError = err as DOMException
-          addDebug(`Camera error (${mediaError.name}), falling back to audio only...`)
-          try {
-            mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true })
-            addDebug(`Audio-only fallback - Audio tracks: ${mediaStream.getAudioTracks().length}`)
-          } catch (audioErr) {
-            const audioError = audioErr as DOMException
-            setError(`No media devices available: ${audioError.message}`)
-            addDebug(`Fatal error: ${audioError.message}`)
-            return
-          }
-        }
+    script.onload = () => {
+      const jitsiContainer = document.getElementById("jitsi-container")
+      if (!jitsiContainer || !(window as any).JitsiMeetExternalAPI) return
 
-        if (!mediaStream) return
-        localStreamRef.current = mediaStream
-        setLocalStream(mediaStream)
-        setIsVideoOn(mediaStream.getVideoTracks().length > 0)
-        setIsAudioOn(mediaStream.getAudioTracks().length > 0)
-
-        // Display local video if available
-        if (localVideoRef.current && mediaStream.getVideoTracks().length > 0) {
-          localVideoRef.current.srcObject = mediaStream
-        }
-
-        // Create peer connection
-        const peerConnection = new RTCPeerConnection({
-          iceServers: [
-            {
-              urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302", "stun:stun2.l.google.com:19302"],
-            },
-          ],
-          iceCandidatePoolSize: 20,
-        })
-
-        peerConnectionRef.current = peerConnection
-        addDebug("RTCPeerConnection created")
-
-        // Add local tracks
-        mediaStream.getTracks().forEach((track) => {
-          peerConnection.addTrack(track, mediaStream)
-          addDebug(`Added ${track.kind} track`)
-        })
-
-        // Handle remote tracks
-        peerConnection.ontrack = (event) => {
-          addDebug(`Received ${event.track.kind} track`)
-          if (!remoteStreamRef.current) {
-            remoteStreamRef.current = new MediaStream()
-            setRemoteStream(remoteStreamRef.current)
-            if (remoteVideoRef.current) {
-              remoteVideoRef.current.srcObject = remoteStreamRef.current
-            }
-          }
-          remoteStreamRef.current?.addTrack(event.track)
-        }
-
-        // Handle connection state
-        peerConnection.onconnectionstatechange = () => {
-          const state = peerConnection.connectionState
-          addDebug(`Connection state: ${state}`)
-          if (state === "connected") {
-            setConnectionStatus("connected")
-          } else if (state === "failed" || state === "disconnected") {
-            setConnectionStatus("disconnected")
-          }
-        }
-
-        // Handle ICE candidates
-        peerConnection.onicecandidate = (event) => {
-          if (event.candidate) {
-            sendSignal("ice-candidate", event.candidate)
-          }
-        }
-
-        // Set up signaling channel
-        const supabase = createClient()
-        const channel = supabase
-          .channel(`video:${matchId}`)
-          .on(
-            "postgres_changes",
-            {
-              event: "INSERT",
-              schema: "public",
-              table: "webrtc_signals",
-              filter: `match_id=eq.${matchId}`,
-            },
-            async (payload) => {
-              const signal = payload.new as any
-              if (signal.from_user_id !== userId) {
-                await handleSignal(signal, peerConnection)
-              }
-            },
-          )
-          .subscribe((status) => {
-            addDebug(`Channel status: ${status}`)
-          })
-
-        channelRef.current = channel
-        addDebug("Signaling channel ready")
-
-        // Create offer if this is the offer peer
-        if (isOfferPeer) {
-          addDebug("Creating offer...")
-          const offer = await peerConnection.createOffer()
-          await peerConnection.setLocalDescription(offer)
-          addDebug("Offer created, sending...")
-          sendSignal("offer", offer)
-        } else {
-          addDebug("Waiting for offer from peer...")
-        }
-
-        setConnectionStatus("connecting")
-      } catch (err) {
-        const unknownError = err as Error
-        setError(unknownError.message)
-        addDebug(`Fatal error: ${unknownError.message}`)
-      }
-    }
-
-    initWebRTC()
-
-    // Cleanup
-    return () => {
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach((track) => track.stop())
-        addDebug("Local stream stopped")
-      }
-      if (peerConnectionRef.current) {
-        peerConnectionRef.current.close()
-        addDebug("Peer connection closed")
-      }
-      if (channelRef.current) {
-        channelRef.current.unsubscribe()
-        addDebug("Channel unsubscribed")
-      }
-    }
-  }, [isOfferPeer, userId])
-
-  const handleSignal = async (signal: any, peerConnection: RTCPeerConnection) => {
-    try {
-      addDebug(`Received ${signal.signal_type}`)
-
-      if (signal.signal_type === "offer") {
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.signal_data))
-        const answer = await peerConnection.createAnswer()
-        await peerConnection.setLocalDescription(answer)
-        sendSignal("answer", answer)
-        addDebug("Answer sent")
-      } else if (signal.signal_type === "answer") {
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.signal_data))
-        addDebug("Answer received")
-      } else if (signal.signal_type === "ice-candidate") {
-        try {
-          await peerConnection.addIceCandidate(new RTCIceCandidate(signal.signal_data))
-        } catch (e) {
-          addDebug(`ICE error: ${e}`)
-        }
-      }
-    } catch (err) {
-      addDebug(`Signal error: ${err}`)
-    }
-  }
-
-  const sendSignal = async (type: "offer" | "answer" | "ice-candidate", data: any) => {
-    try {
-      const supabase = createClient()
-      await supabase.from("webrtc_signals").insert({
-        match_id: matchId,
-        from_user_id: userId,
-        to_user_id: partner.id,
-        signal_type: type,
-        signal_data: data,
+      const api = new (window as any).JitsiMeetExternalAPI("meet.jit.si", {
+        roomName: jitsiRoomId,
+        width: "100%",
+        height: "100%",
+        parentNode: jitsiContainer,
+        userInfo: {
+          displayName: userProfile.display_name || "User",
+          email: userProfile.email,
+        },
+        configOverwrite: {
+          defaultLanguage: "en",
+          startWithAudioMuted: false,
+          startWithVideoMuted: false,
+          prejoinPageEnabled: false,
+          disableSimulcast: false,
+        },
+        interfaceConfigOverwrite: {
+          DEFAULT_BACKGROUND: "#1e293b",
+          TOOLBAR_BUTTONS: ["microphone", "camera", "fullscreen", "hangup", "chat"],
+          MOBILE_APP_PROMO: false,
+          SHOW_WATERMARK: false,
+        },
       })
-      addDebug(`${type} sent`)
-    } catch (err) {
-      addDebug(`Send error: ${err}`)
-    }
-  }
 
-  const toggleVideo = () => {
-    if (localStreamRef.current) {
-      const videoTrack = localStreamRef.current.getVideoTracks()[0]
-      if (videoTrack) {
-        videoTrack.enabled = !videoTrack.enabled
-        setIsVideoOn(videoTrack.enabled)
+      api.addEventListener("fullscreenChanged", (e: any) => {
+        setIsFullscreen(e.fullscreen)
+      })
+
+      // Cleanup
+      return () => {
+        try {
+          api.dispose()
+        } catch (e) {
+          console.error("Error disposing Jitsi API:", e)
+        }
       }
     }
-  }
 
-  const toggleAudio = () => {
-    if (localStreamRef.current) {
-      const audioTrack = localStreamRef.current.getAudioTracks()[0]
-      if (audioTrack) {
-        audioTrack.enabled = !audioTrack.enabled
-        setIsAudioOn(audioTrack.enabled)
-      }
+    return () => {
+      script.remove()
     }
-  }
-
-  const endCall = () => {
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((track) => track.stop())
-    }
-    if (peerConnectionRef.current) {
-      peerConnectionRef.current.close()
-    }
-    window.history.back()
-  }
+  }, [jitsiRoomId, userProfile])
 
   if (error) {
     return (
@@ -295,134 +127,76 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
 
   return (
     <div ref={containerRef} className="flex h-[calc(100vh-2rem)] flex-col bg-slate-900">
-      {/* Header */}
-      <div className="flex items-center justify-between border-b border-slate-700 bg-slate-800/50 px-4 py-3 backdrop-blur-sm">
-        <div className="flex items-center gap-3">
-          <Button variant="ghost" size="icon" className="hover:bg-slate-700" asChild>
-            <Link href={`/dashboard/chat/${matchId}`}>
-              <ArrowLeft className="h-5 w-5 text-slate-200" />
-            </Link>
-          </Button>
-          <Avatar className="h-10 w-10 border-2 border-slate-600">
-            <AvatarFallback className="bg-gradient-to-br from-primary to-pink-400 text-white font-semibold">
-              {partnerInitials}
-            </AvatarFallback>
-          </Avatar>
-          <div>
-            <p className="font-medium text-slate-100">{partner.display_name}</p>
-            <div className="flex items-center gap-2">
-              <Badge variant="secondary" className="bg-slate-700 text-slate-200 border-slate-600 text-xs h-5">
-                {youTeach}
-              </Badge>
-              <span className="text-xs text-slate-400">↔</span>
-              <Badge variant="outline" className="bg-slate-700 text-slate-200 border-slate-600 text-xs h-5">
-                {youLearn}
-              </Badge>
+      {/* Header - only show when not fullscreen */}
+      {!isFullscreen && (
+        <div className="flex items-center justify-between border-b border-slate-700 bg-slate-800/50 px-4 py-3 backdrop-blur-sm z-50">
+          <div className="flex items-center gap-3">
+            <Button variant="ghost" size="icon" className="hover:bg-slate-700" asChild>
+              <Link href={`/dashboard/chat/${matchId}`}>
+                <ArrowLeft className="h-5 w-5 text-slate-200" />
+              </Link>
+            </Button>
+            <Avatar className="h-10 w-10 border-2 border-slate-600">
+              <AvatarFallback className="bg-gradient-to-br from-primary to-pink-400 text-white font-semibold">
+                {partnerInitials}
+              </AvatarFallback>
+            </Avatar>
+            <div>
+              <p className="font-medium text-slate-100">{partner.display_name}</p>
+              <div className="flex items-center gap-2">
+                <Badge variant="secondary" className="bg-slate-700 text-slate-200 border-slate-600 text-xs h-5">
+                  {youTeach}
+                </Badge>
+                <span className="text-xs text-slate-400">↔</span>
+                <Badge variant="outline" className="bg-slate-700 text-slate-200 border-slate-600 text-xs h-5">
+                  {youLearn}
+                </Badge>
+              </div>
             </div>
           </div>
-        </div>
 
-        <Badge
-          variant={connectionStatus === "connected" ? "default" : "secondary"}
-          className={connectionStatus === "connected" ? "bg-green-600" : "bg-slate-700"}
-        >
-          {connectionStatus === "connected" ? "● Connected" : "○ Connecting..."}
-        </Badge>
-      </div>
+          <Badge className="bg-gradient-to-r from-primary to-pink-400 text-white flex items-center gap-2">
+            <span className="w-2 h-2 bg-white rounded-full animate-pulse"></span>
+            100% Free
+          </Badge>
+        </div>
+      )}
 
       {/* Video Area */}
       <div className="flex-1 relative bg-slate-950 overflow-hidden">
-        {/* Remote video - Main area */}
-        <div className="absolute inset-0">
-          {remoteStream ? (
-            <video ref={remoteVideoRef} autoPlay playsInline className="h-full w-full object-cover" />
-          ) : (
-            <div className="h-full w-full flex items-center justify-center bg-gradient-to-br from-slate-900 to-slate-950">
-              <div className="text-center">
-                <Avatar className="h-40 w-40 mx-auto mb-6 border-4 border-slate-700">
-                  <AvatarFallback className="bg-gradient-to-br from-primary to-pink-400 text-white text-5xl font-semibold">
-                    {partnerInitials}
-                  </AvatarFallback>
-                </Avatar>
-                <p className="text-2xl font-semibold text-slate-100">{partner.display_name}</p>
-                <p className="text-slate-400 text-sm mt-2">
-                  {connectionStatus === "connected" ? "Connected" : "Waiting for connection..."}
-                </p>
-              </div>
-            </div>
-          )}
-        </div>
+        {/* Jitsi Meet Container */}
+        <div id="jitsi-container" className="w-full h-full" />
 
-        {/* Local video - PiP */}
-        {isVideoOn && localStream && (
-          <div className="absolute bottom-24 right-4 w-56 aspect-video rounded-2xl overflow-hidden border-2 border-slate-600 shadow-2xl bg-slate-800">
-            <video ref={localVideoRef} autoPlay muted playsInline className="h-full w-full object-cover" />
-          </div>
-        )}
-
-        {/* Local avatar when no video */}
-        {!isVideoOn && localStream && (
-          <div className="absolute bottom-24 right-4 w-56 aspect-video rounded-2xl overflow-hidden border-2 border-slate-600 shadow-2xl bg-slate-800 flex items-center justify-center">
-            <Avatar className="h-20 w-20">
-              <AvatarFallback className="bg-gradient-to-br from-primary to-pink-400 text-white text-2xl font-semibold">
-                {userInitials}
-              </AvatarFallback>
-            </Avatar>
-          </div>
-        )}
-      </div>
-
-      {/* Control Bar */}
-      <div className="absolute bottom-0 left-0 right-0 flex items-center justify-center pb-6 px-4">
-        <div className="bg-slate-800/95 backdrop-blur-md rounded-full px-6 py-3 flex items-center gap-4 border border-slate-700 shadow-2xl">
-          <Button
-            variant={isAudioOn ? "ghost" : "destructive"}
-            size="lg"
-            className={`h-12 w-12 rounded-full ${isAudioOn ? "hover:bg-slate-700 text-slate-200" : "bg-red-600 hover:bg-red-700 text-white"}`}
-            onClick={toggleAudio}
-          >
-            {isAudioOn ? <Mic className="h-5 w-5" /> : <MicOff className="h-5 w-5" />}
-          </Button>
-
-          <Button
-            variant={isVideoOn ? "ghost" : "destructive"}
-            size="lg"
-            className={`h-12 w-12 rounded-full ${isVideoOn ? "hover:bg-slate-700 text-slate-200" : "bg-red-600 hover:bg-red-700 text-white"}`}
-            onClick={toggleVideo}
-          >
-            {isVideoOn ? <Video className="h-5 w-5" /> : <VideoOff className="h-5 w-5" />}
-          </Button>
-
-          <div className="w-px h-8 bg-slate-600"></div>
-
-          <Button
-            variant="destructive"
-            size="lg"
-            className="h-12 w-12 rounded-full bg-red-600 hover:bg-red-700 text-white shadow-lg hover:shadow-red-600/50"
-            onClick={endCall}
-          >
-            <PhoneOff className="h-5 w-5" />
-          </Button>
-
-          <div className="w-px h-8 bg-slate-600"></div>
-
+        {/* Fullscreen Helper Button */}
+        {isFullscreen && (
           <Button
             variant="ghost"
-            size="lg"
-            className="h-12 w-12 rounded-full hover:bg-slate-700 text-slate-200"
-            onClick={() => setShowStats(!showStats)}
+            size="icon"
+            className="absolute top-4 left-4 hover:bg-slate-700/50 text-slate-200 z-50"
+            onClick={() => {
+              try {
+                if (document.fullscreenElement) {
+                  document.exitFullscreen()
+                } else {
+                  document.documentElement.requestFullscreen()
+                }
+              } catch (e) {
+                console.error("Fullscreen error:", e)
+              }
+            }}
           >
-            {showStats ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+            <Maximize2 className="h-5 w-5" />
           </Button>
-        </div>
+        )}
       </div>
 
-      {/* Debug Log */}
-      {showStats && (
-        <div className="absolute bottom-32 right-4 bg-slate-800 border border-slate-700 rounded-lg p-4 text-xs text-slate-300 max-h-40 overflow-auto font-mono">
-          {debugLog.map((log, i) => (
-            <div key={i}>{log}</div>
-          ))}
+      {/* Free Badge for bottom display when fullscreen */}
+      {isFullscreen && (
+        <div className="absolute bottom-4 left-4 z-50">
+          <Badge className="bg-gradient-to-r from-primary to-pink-400 text-white flex items-center gap-2">
+            <span className="w-2 h-2 bg-white rounded-full animate-pulse"></span>
+            100% Free Skill Exchange
+          </Badge>
         </div>
       )}
     </div>
