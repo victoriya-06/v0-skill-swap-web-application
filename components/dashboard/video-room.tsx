@@ -58,85 +58,62 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
           return
         }
 
-        let devices: MediaDeviceInfo[] = []
+        let mediaStream: MediaStream | null = null
         try {
-          // Request camera and microphone permissions first
-          await navigator.mediaDevices
-            .getUserMedia({ audio: true, video: true })
-            .then((stream) => {
-              // Close immediately, we just needed permissions
-              stream.getTracks().forEach((track) => track.stop())
-              addDebug("Permissions granted")
-            })
-            .catch(() => {
-              addDebug("Initial permission check skipped (user may have denied)")
-            })
-
-          // Now enumerate devices
-          devices = await navigator.mediaDevices.enumerateDevices()
+          mediaStream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+            video: {
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+              facingMode: "user",
+            },
+          })
+          addDebug(
+            `Media acquired - Video: ${mediaStream.getVideoTracks().length}, Audio: ${mediaStream.getAudioTracks().length}`,
+          )
         } catch (err) {
-          addDebug(`Error enumerating devices: ${err}`)
-          devices = await navigator.mediaDevices.enumerateDevices()
+          const mediaError = err as DOMException
+          addDebug(`getUserMedia error: ${mediaError.name} - ${mediaError.message}`)
+
+          // Fallback: Try audio only
+          if (mediaError.name === "NotFoundError" || mediaError.name === "DevicesNotFoundError") {
+            addDebug("Camera not found, trying audio only...")
+            try {
+              mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+              addDebug(`Fallback: Audio only - Audio tracks: ${mediaStream.getAudioTracks().length}`)
+            } catch (audioErr) {
+              const audioError = audioErr as DOMException
+              setNoDevices(true)
+              setError(`No devices found: ${audioError.message}`)
+              addDebug(`No audio device found either: ${audioError.message}`)
+              return
+            }
+          } else if (mediaError.name === "NotAllowedError" || mediaError.name === "PermissionDeniedError") {
+            setError("Camera/microphone access was denied. Please allow access in your browser settings.")
+            addDebug("Permission denied error")
+            return
+          } else {
+            setNoDevices(true)
+            setError(`Unable to access media: ${mediaError.message}`)
+            addDebug(`Unexpected media error: ${mediaError.message}`)
+            return
+          }
         }
 
-        const hasVideo = devices.some((device) => device.kind === "videoinput" && device.deviceId !== "")
-        const hasAudio = devices.some((device) => device.kind === "audioinput" && device.deviceId !== "")
-
-        addDebug(`Devices found - Video: ${hasVideo}, Audio: ${hasAudio}`)
-        if (hasVideo) {
-          devices
-            .filter((d) => d.kind === "videoinput")
-            .forEach((d) => {
-              addDebug(`  Video device: ${d.label || d.deviceId}`)
-            })
-        }
-        if (hasAudio) {
-          devices
-            .filter((d) => d.kind === "audioinput")
-            .forEach((d) => {
-              addDebug(`  Audio device: ${d.label || d.deviceId}`)
-            })
-        }
-
-        if (!hasVideo && !hasAudio) {
-          setNoDevices(true)
-          setError("No camera or microphone found on this device.")
+        if (!mediaStream) {
+          setError("Failed to get media stream")
           return
         }
 
-        const constraints: MediaStreamConstraints = {
-          video: hasVideo
-            ? {
-                width: { ideal: 1280 },
-                height: { ideal: 720 },
-                facingMode: "user",
-              }
-            : false,
-          audio: hasAudio
-            ? {
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
-              }
-            : false,
-        }
-
-        addDebug(`Requesting media with constraints: video=${!!constraints.video}, audio=${!!constraints.audio}`)
-        const mediaStream = await navigator.mediaDevices.getUserMedia(constraints)
         setLocalStream(mediaStream)
-        setIsVideoOn(hasVideo)
-        setIsAudioOn(hasAudio)
-        addDebug(
-          `Local media stream acquired - Video tracks: ${mediaStream.getVideoTracks().length}, Audio tracks: ${mediaStream.getAudioTracks().length}`,
-        )
+        setIsVideoOn(mediaStream.getVideoTracks().length > 0)
+        setIsAudioOn(mediaStream.getAudioTracks().length > 0)
 
-        if (localVideoRef.current) {
+        if (localVideoRef.current && mediaStream.getVideoTracks().length > 0) {
           localVideoRef.current.srcObject = mediaStream
-          localVideoRef.current.onloadedmetadata = () => {
-            localVideoRef.current?.play().catch((err) => {
-              addDebug(`Error playing local video: ${err.message}`)
-            })
-          }
+          localVideoRef.current.play().catch((err) => {
+            addDebug(`Error playing local video: ${err.message}`)
+          })
         }
 
         const peerConnection = new RTCPeerConnection({
@@ -158,20 +135,22 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
         addDebug("RTCPeerConnection created")
 
         mediaStream.getTracks().forEach((track) => {
-          addDebug(`Adding track to peer connection: ${track.kind}`)
+          addDebug(`Adding ${track.kind} track to peer connection`)
           try {
             peerConnection.addTrack(track, mediaStream)
           } catch (err) {
-            addDebug(`Error adding track: ${err}`)
+            addDebug(`Error adding ${track.kind} track: ${err}`)
           }
         })
 
         peerConnection.ontrack = (event) => {
-          addDebug(`Remote track received: ${event.track.kind}`)
-          if (remoteVideoRef.current && event.streams[0]) {
-            remoteVideoRef.current.srcObject = event.streams[0]
+          addDebug(`Remote ${event.track.kind} track received`)
+          if (event.streams[0]) {
             setRemoteStream(event.streams[0])
-            addDebug("Remote stream set to video element")
+            if (remoteVideoRef.current && event.track.kind === "video") {
+              remoteVideoRef.current.srcObject = event.streams[0]
+              addDebug("Remote stream assigned to video element")
+            }
           }
         }
 
@@ -194,7 +173,7 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
 
         peerConnection.onicecandidate = (event) => {
           if (event.candidate) {
-            addDebug(`Sending ICE candidate: ${event.candidate.candidate.substring(0, 50)}...`)
+            addDebug(`Sending ICE candidate`)
             sendSignal("ice-candidate", event.candidate)
           }
         }
@@ -211,19 +190,9 @@ export function VideoRoom({ matchId, userId, userProfile, partner, youTeach, you
 
         setConnectionStatus("connecting")
       } catch (err) {
-        const mediaError = err as DOMException
-        if (mediaError.name === "NotFoundError" || mediaError.name === "DevicesNotFoundError") {
-          setNoDevices(true)
-          setError("No camera or microphone found. You can still join audio-only or use chat.")
-          addDebug("No devices found error")
-        } else if (mediaError.name === "NotAllowedError" || mediaError.name === "PermissionDeniedError") {
-          setError("Camera/microphone access was denied. Please allow access in your browser settings.")
-          addDebug("Permission denied error")
-        } else {
-          setNoDevices(true)
-          setError(`Unable to access media: ${mediaError.message}`)
-          addDebug(`Unexpected media error: ${mediaError.message}`)
-        }
+        const unknownError = err as any
+        addDebug(`Unexpected error in initWebRTC: ${unknownError.message}`)
+        setError("An unexpected error occurred. Please try again.")
       }
     }
 
