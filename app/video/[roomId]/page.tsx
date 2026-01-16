@@ -1,24 +1,21 @@
-"use client";
+import type { Metadata } from "next"
+import { VideoTimeRoom } from "@/components/videotime-room"
 
-export default function VideoPage({
-  params,
-}: {
-  params: { roomId: string };
-}) {
-  const roomId = params.roomId;
+export const metadata: Metadata = {
+  title: "VideoTime | SkillSwap",
+  description: "100% Free Skill Exchange Video Conference",
+}
+
+interface VideoPageProps {
+  params: Promise<{ roomId: string }>
+}
+
+export default async function VideoPage({ params }: VideoPageProps) {
+  const { roomId } = await params
 
   return (
-    <div className="fixed inset-0 bg-black">
-      <iframe
-        src={`https://meet.jit.si/${roomId}?config.prejoinPageEnabled=false&config.enableLobby=false&config.startWithAudioMuted=false&config.startWithVideoMuted=false`}
-        allow="camera; microphone; fullscreen; display-capture"
-        allowFullScreen
-        className="w-full h-full border-0"
-      />
-
-      <div className="absolute top-4 right-4 bg-pink-600 text-white text-sm px-3 py-1 rounded-full z-10">
-        100% Free Skill Exchange
-      </div>
+    <div className="fixed inset-0 bg-black overflow-hidden">
+      <VideoTimeRoom roomId={roomId} />
     </div>
-  );
+  )
 }
